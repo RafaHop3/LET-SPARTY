@@ -5,17 +5,47 @@ import { prisma } from "@/lib/prisma";
 import { preferenceClient, calculateSplit } from "@/lib/mercadopago";
 
 // ─── POST /api/tickets ─────────────────────────────────────────
-// Inicia a compra de um ingresso e cria preferência no MercadoPago
+// Inicia a compra de um ingresso e cria preferência no MercadoPago ou Simulação
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session?.user) {
-      return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
-    }
-
-    const user = session.user as { id: string; role: string; name?: string; email?: string };
     const body = await req.json();
-    const { eventId } = body;
+    const { eventId, couponCode, email, name } = body;
+
+    let userId = (session?.user as any)?.id;
+    let userEmail = session?.user?.email;
+    let userName = session?.user?.name;
+
+    // Protocolo de Login Opcional: Se não logado, requer email/nome para checkout de visitante
+    if (!userId) {
+      if (!email || !name) {
+        return NextResponse.json(
+          { error: "É necessário estar logado ou informar E-mail e Nome para finalizar a compra" },
+          { status: 400 }
+        );
+      }
+
+      // Upsert do usuário convidado no banco
+      const guestUser = await prisma.user.upsert({
+        where: { email: email.trim().toLowerCase() },
+        update: { name: name.trim() },
+        create: {
+          email: email.trim().toLowerCase(),
+          name: name.trim(),
+          role: "FESTEIRO",
+          festeiroProfile: {
+            create: {
+              phone: "",
+              cpf: `GUEST-TICKET-${Date.now()}`,
+            },
+          },
+        },
+      });
+
+      userId = guestUser.id;
+      userEmail = guestUser.email;
+      userName = guestUser.name;
+    }
 
     if (!eventId) {
       return NextResponse.json(
@@ -44,41 +74,93 @@ export async function POST(req: Request) {
       );
     }
 
-    // Verificar se o evento já passou
-    if (new Date(event.date) < new Date()) {
-      return NextResponse.json(
-        { error: "Não é possível comprar ingressos para eventos passados" },
-        { status: 400 }
-      );
-    }
-
     // Verificar se o usuário já tem ingresso aprovado
     const existingTicket = await prisma.ticket.findFirst({
-      where: { eventId, userId: user.id, status: "APPROVED" },
+      where: { eventId, userId, status: "APPROVED" },
     });
     if (existingTicket) {
       return NextResponse.json(
-        { error: "Você já possui um ingresso para este evento" },
+        { error: "Você já possui um ingresso ativo para este evento" },
         { status: 400 }
       );
     }
 
-    // Calcular split: 10% plataforma / 90% produtor
-    const { platformFee, producerAmount } = calculateSplit(event.price);
+    // --- PROCESSAMENTO DE CUPOM ---
+    let finalPrice = event.price;
+    let discountAmount = 0;
+    let couponId: string | null = null;
 
+    if (couponCode && couponCode.trim()) {
+      const coupon = await prisma.coupon.findUnique({
+        where: { code: couponCode.trim().toUpperCase() },
+      });
+
+      if (coupon && coupon.isActive && coupon.usedCount < coupon.maxUses) {
+        discountAmount = parseFloat(((event.price * coupon.discountPercent) / 100).toFixed(2));
+        finalPrice = Math.max(0, parseFloat((event.price - discountAmount).toFixed(2)));
+        couponId = coupon.id;
+
+        // Atualizar contagem de uso do cupom
+        await prisma.coupon.update({
+          where: { id: coupon.id },
+          data: { usedCount: { increment: 1 } },
+        });
+      }
+    }
+
+    // Calcular split: 10% plataforma / 90% produtor baseado no preço final
+    const { platformFee, producerAmount } = calculateSplit(finalPrice);
+
+    // --- PROTOCOLO DE TESTE / COMPRA SIMULADA ---
+    // Se MP_ACCESS_TOKEN não está definido, fazemos compra instantânea simulada para desenvolvimento
+    const mpAccessToken = process.env.MP_ACCESS_TOKEN;
+    if (!mpAccessToken || mpAccessToken.trim() === "" || mpAccessToken.includes("YOUR") || mpAccessToken.includes("sb_publishable")) {
+      
+      const ticket = await prisma.ticket.create({
+        data: {
+          eventId,
+          userId,
+          status: "APPROVED", // Auto-aprova para fluidez de teste sem chaves
+          amount: finalPrice,
+          platformFee,
+          producerAmount,
+          couponId,
+          discountAmount,
+          mpPaymentId: `SIMULADO-${Date.now()}`,
+          mpPreferenceId: "SIMULADO-PREF",
+        },
+      });
+
+      return NextResponse.json(
+        {
+          message: "Compra simulada com sucesso! (Modo Desenvolvimento)",
+          simulated: true,
+          ticketId: ticket.id,
+          amount: finalPrice,
+          discountAmount,
+          platformFee,
+          producerAmount,
+          status: "APPROVED",
+        },
+        { status: 201 }
+      );
+    }
+
+    // --- FLUXO INTEGRADO REAL MERCADOPAGO ---
     // Criar ticket pendente no banco
     const ticket = await prisma.ticket.create({
       data: {
         eventId,
-        userId: user.id,
+        userId,
         status: "PENDING",
-        amount: event.price,
+        amount: finalPrice,
         platformFee,
         producerAmount,
+        couponId,
+        discountAmount,
       },
     });
 
-    // Criar preferência de pagamento no MercadoPago
     const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
     const preference = await preferenceClient.create({
       body: {
@@ -88,15 +170,14 @@ export async function POST(req: Request) {
             title: `Ingresso — ${event.title}`,
             description: `${event.venue} • ${new Date(event.date).toLocaleDateString("pt-BR")}`,
             quantity: 1,
-            unit_price: event.price,
+            unit_price: finalPrice,
             currency_id: "BRL",
           },
         ],
         payer: {
-          name: user.name,
-          email: user.email,
+          name: userName || "Festeiro Convidado",
+          email: userEmail || "convidado@letsparty.com",
         },
-        // Taxa da plataforma retida automaticamente
         marketplace_fee: platformFee,
         back_urls: {
           success: `${baseUrl}/tickets/success?ticketId=${ticket.id}`,
@@ -106,7 +187,6 @@ export async function POST(req: Request) {
         auto_return: "approved",
         notification_url: `${baseUrl}/api/webhooks/mercadopago`,
         external_reference: ticket.id,
-        // Expiração: 30 minutos para completar o pagamento
         expiration_date_to: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       },
     });
@@ -121,18 +201,17 @@ export async function POST(req: Request) {
       {
         ticketId: ticket.id,
         preferenceId: preference.id,
-        // init_point: URL do checkout MP (web)
         checkoutUrl: preference.init_point,
-        // sandbox_init_point: para testes
         sandboxCheckoutUrl: preference.sandbox_init_point,
-        amount: event.price,
+        amount: finalPrice,
+        discountAmount,
         platformFee,
         producerAmount,
       },
       { status: 201 }
     );
   } catch (error) {
-    console.error("[POST /api/tickets]", error);
+    console.error("[POST /api/tickets] Error:", error);
     return NextResponse.json(
       { error: "Erro ao criar ingresso" },
       { status: 500 }

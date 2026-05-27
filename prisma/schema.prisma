@@ -21,6 +21,13 @@ model User {
   events           Event[]
   tickets          Ticket[]
   votes            Vote[]
+  
+  // Novas Relações
+  posts            Post[]
+  comments         Comment[]
+  carpoolsActive   Carpool[]
+  carpoolsJoined   CarpoolPassenger[]
+  coupons          Coupon[]
 }
 
 enum Role {
@@ -69,6 +76,10 @@ model Event {
   tickets     Ticket[]
   voteRecords Vote[]
 
+  // Novas Relações
+  posts       Post[]
+  carpools    Carpool[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -83,6 +94,11 @@ model Ticket {
   amount         Float                // Valor total do ticket
   platformFee    Float                // 10% - valor da plataforma
   producerAmount Float                // 90% - valor líquido para o produtor
+
+  // Relação com cupons
+  couponId       String?
+  coupon         Coupon?      @relation(fields: [couponId], references: [id])
+  discountAmount Float?       @default(0)
 
   event Event @relation(fields: [eventId], references: [id])
   user  User  @relation(fields: [userId], references: [id])
@@ -110,4 +126,67 @@ model Vote {
   createdAt DateTime @default(now())
 
   @@unique([userId, eventId])
+}
+
+// ─── NOVOS MODELOS ───
+
+model Post {
+  id        String    @id @default(uuid())
+  content   String
+  imageUrl  String?
+  createdAt DateTime  @default(now())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventId   String?
+  event     Event?    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  comments  Comment[]
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  content   String
+  createdAt DateTime @default(now())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+}
+
+model Coupon {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  discountPercent Float
+  maxUses         Int      @default(1)
+  usedCount       Int      @default(0)
+  isActive        Boolean  @default(true)
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tickets         Ticket[]
+  createdAt       DateTime @default(now())
+}
+
+model Carpool {
+  id                String             @id @default(uuid())
+  eventId           String
+  event             Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  driverId          String
+  driver            User               @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  availableSeats    Int
+  departureLocation String
+  departureTime     DateTime
+  description       String?
+  signedWaiver      Boolean            @default(true)
+  passengers        CarpoolPassenger[]
+  createdAt         DateTime           @default(now())
+}
+
+model CarpoolPassenger {
+  id          String   @id @default(uuid())
+  carpoolId   String
+  carpool     Carpool  @relation(fields: [carpoolId], references: [id], onDelete: Cascade)
+  passengerId String
+  passenger   User     @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@unique([carpoolId, passengerId])
 }
