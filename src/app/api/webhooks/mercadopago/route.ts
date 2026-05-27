@@ -89,17 +89,55 @@ export async function POST(req: Request) {
 
     const ticketStatus = ticketStatusMap[status || ""] || "PENDING";
 
-    // 3. Atualizar o ticket no banco
-    await prisma.ticket.update({
-      where: { id: externalReference },
-      data: {
-        status: ticketStatus as TicketStatus,
-        mpPaymentId: String(paymentId),
-      },
+    // 3. Atualizar o ticket no banco de forma transacional e avaliar elegibilidade de giros
+    await prisma.$transaction(async (tx) => {
+      const updatedTicket = await tx.ticket.update({
+        where: { id: externalReference },
+        data: {
+          status: ticketStatus as TicketStatus,
+          mpPaymentId: String(paymentId),
+        },
+      });
+
+      // Se o pagamento foi aprovado, avalia concessão de giros da roleta
+      if (ticketStatus === "APPROVED") {
+        const uncountedTickets = await tx.ticket.findMany({
+          where: {
+            userId: updatedTicket.userId,
+            status: "APPROVED",
+            spinGranted: false,
+          },
+          select: { id: true }
+        });
+
+        if (uncountedTickets.length >= 2) {
+          const pairsCount = Math.floor(uncountedTickets.length / 2);
+          const spinsToGrant = pairsCount;
+          const ticketIdsToMark = uncountedTickets.slice(0, pairsCount * 2).map((t: any) => t.id);
+
+          // Incrementa saldo de giros
+          await tx.user.update({
+            where: { id: updatedTicket.userId },
+            data: { availableSpins: { increment: spinsToGrant } }
+          });
+
+          // Marca estes ingressos como contabilizados
+          await tx.ticket.updateMany({
+            where: {
+              id: { in: ticketIdsToMark }
+            },
+            data: {
+              spinGranted: true
+            }
+          });
+
+          console.log(`[Roleta Sparty] Webhook MP: Concedido ${spinsToGrant} giros para o usuário ${updatedTicket.userId} (tickets: ${ticketIdsToMark.join(", ")})`);
+        }
+      }
     });
 
     console.log(
-      `[MP Webhook] Ticket ${externalReference} atualizado com sucesso para ${ticketStatus} (pagamento: ${paymentId})`
+      `[MP Webhook] Ticket ${externalReference} atualizado transacionalmente para ${ticketStatus} (pagamento: ${paymentId})`
     );
 
     return NextResponse.json({ received: true });

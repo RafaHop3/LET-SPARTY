@@ -136,6 +136,8 @@ export default function Home() {
   const [wheelResult, setWheelResult] = useState<number | null>(null);
   const [wonCoupon, setWonCoupon] = useState<string | null>(null);
   const [wonDiscount, setWonDiscount] = useState<number | null>(null);
+  const [availableSpins, setAvailableSpins] = useState<number>(0);
+
 
   // Form states
   const [newPostContent, setNewPostContent] = useState('');
@@ -265,9 +267,26 @@ export default function Home() {
     }
   };
 
+  // Fetch Available Spins for current user
+  const fetchAvailableSpins = async () => {
+    try {
+      const res = await fetch('/api/coupons');
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableSpins(data.availableSpins || 0);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+
   useEffect(() => {
     fetchEvents();
-  }, []);
+    if (session?.user) {
+      fetchAvailableSpins();
+    }
+  }, [session]);
 
   useEffect(() => {
     if (activeTab === 'social') {
@@ -278,8 +297,12 @@ export default function Home() {
       fetchProducerData();
     } else if (activeTab === 'my-tickets' && session?.user) {
       fetchMyTickets();
+      fetchAvailableSpins();
+    } else if (activeTab === 'minigame' && session?.user) {
+      fetchAvailableSpins();
     }
   }, [activeTab, selectedEventForCarpool, session]);
+
 
   // Handle Event Purchase Checkout confirmation
   const handleTicketConfirm = async (checkoutPayload: { couponCode?: string; email?: string; name?: string }) => {
@@ -403,33 +426,42 @@ export default function Home() {
     setIsSpinning(true);
     setWonCoupon(null);
     setWonDiscount(null);
+    setWheelResult(null);
+    setErrorMsg('');
+    setSuccessMsg('');
 
-    // Simulate real spin wheel physics with 3s rotation
-    const resultIndex = Math.floor(Math.random() * 5); // 0 to 4
-    const discounts = [5, 10, 15, 20, 25];
-    const discount = discounts[resultIndex];
+    try {
+      const res = await fetch('/api/coupons', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'generate' }),
+      });
+      const data = await res.json();
 
-    setWheelResult(resultIndex);
-
-    setTimeout(async () => {
-      setIsSpinning(false);
-      try {
-        const res = await fetch('/api/coupons', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'generate', discountPercent: discount }),
-        });
-        const data = await res.json();
-        if (res.ok) {
-          setWonCoupon(data.code);
-          setWonDiscount(discount);
-          setSuccessMsg(`Parabéns! Você ganhou um cupom de ${discount}% de desconto!`);
-        }
-      } catch (err) {
-        console.error(err);
+      if (!res.ok) {
+        setIsSpinning(false);
+        setErrorMsg(data.error || "Erro ao girar a roleta.");
+        return;
       }
-    }, 3000);
+
+      const { code, discountPercent, targetIndex } = data;
+      setWheelResult(targetIndex);
+
+      setTimeout(async () => {
+        setIsSpinning(false);
+        setWonCoupon(code);
+        setWonDiscount(discountPercent);
+        setSuccessMsg(`Parabéns! Você ganhou um cupom de ${discountPercent}% de desconto!`);
+        fetchAvailableSpins(); // Recarrega saldo atualizado de giros
+      }, 3000);
+
+    } catch (err) {
+      console.error(err);
+      setIsSpinning(false);
+      setErrorMsg("Erro de conexão ao servidor.");
+    }
   };
+
 
   // Submit Social Post
   const handleCreatePost = async (e: React.FormEvent) => {
@@ -969,9 +1001,25 @@ export default function Home() {
             <h2 style={{ fontSize: '1.8rem', fontWeight: 800, textAlign: 'center', marginBottom: '8px' }}>
               SPARTY <span style={{ color: 'var(--primary-color)' }}>WHEEL</span> 🎡
             </h2>
-            <p style={{ color: 'var(--text-muted)', textAlign: 'center', maxWidth: '500px', marginBottom: '40px', fontSize: '0.95rem' }}>
+            <p style={{ color: 'var(--text-muted)', textAlign: 'center', maxWidth: '500px', marginBottom: '20px', fontSize: '0.95rem' }}>
               Gire a Roleta da LetsParty e ganhe cupons de desconto incríveis para garantir o seu ingresso com até 25% OFF! (Limite: 1 giro por rodada)
             </p>
+
+            {!isLoggedIn ? (
+              <div className="glass-panel text-center animate-fade-in" style={{ padding: '20px', background: 'rgba(255, 0, 122, 0.05)', border: '1px solid var(--accent-color)', maxWidth: '450px', marginBottom: '40px' }}>
+                <span style={{ fontWeight: 700, color: 'var(--accent-color)', display: 'block', marginBottom: '6px' }}>🔒 Autenticação Necessária</span>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Você precisa entrar com a sua conta LetsParty para acumular ingressos e girar a roleta.</p>
+              </div>
+            ) : (
+              <div className="flex-center animate-fade-in" style={{ flexDirection: 'column', gap: '8px', marginBottom: '40px' }}>
+                <span style={{ fontSize: '1.1rem', fontWeight: 700, padding: '6px 20px', borderRadius: '20px', background: 'rgba(0, 245, 230, 0.1)', border: '1px solid rgba(0, 245, 230, 0.3)', color: 'var(--primary-color)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                  ✨ {availableSpins} {availableSpins === 1 ? 'Giro Disponível' : 'Giros Disponíveis'}
+                </span>
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  (Você ganha **1 giro** a cada **2 ingressos aprovados** comprados!)
+                </span>
+              </div>
+            )}
 
             <div style={{ position: 'relative', width: '280px', height: '280px', marginBottom: '40px' }}>
               {/* Center Pin Indicator */}
@@ -1012,12 +1060,13 @@ export default function Home() {
 
             <button 
               onClick={spinWheel} 
-              disabled={isSpinning} 
+              disabled={isSpinning || availableSpins === 0 || !isLoggedIn} 
               className="btn-primary" 
-              style={{ padding: '12px 35px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '1.05rem' }}
+              style={{ padding: '12px 35px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '1.05rem', opacity: (isSpinning || availableSpins === 0 || !isLoggedIn) ? 0.6 : 1 }}
             >
-              {isSpinning ? 'Girando...' : 'Girar Roleta!'}
+              {isSpinning ? 'Girando...' : !isLoggedIn ? 'Acesse sua conta para jogar 🔒' : availableSpins === 0 ? 'Sem Giros Disponíveis 🔒' : 'Girar Roleta!'}
             </button>
+
 
             {wonCoupon && (
               <div className="glass-panel animate-fade-in flex-center" style={{ marginTop: '40px', padding: '24px', flexWrap: 'wrap', gap: '15px', background: 'rgba(102,252,241,0.05)', border: '1px solid var(--primary-color)' }}>

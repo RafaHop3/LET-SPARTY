@@ -28,6 +28,9 @@ model User {
   carpoolsActive   Carpool[]
   carpoolsJoined   CarpoolPassenger[]
   coupons          Coupon[]
+
+  // 🔐 TRAVA DE SEGURANÇA: Saldo de giros da roleta
+  availableSpins   Int               @default(0)
 }
 
 enum Role {
@@ -104,6 +107,9 @@ model Ticket {
   coupon         Coupon?      @relation(fields: [couponId], references: [id])
   discountAmount Float?       @default(0)
 
+  // 🔐 CONTROLE FINANCEIRO: Giro da roleta concedido
+  spinGranted    Boolean      @default(false)
+
   event Event @relation(fields: [eventId], references: [id])
   user  User  @relation(fields: [userId], references: [id])
 
@@ -164,16 +170,21 @@ model Comment {
 }
 
 model Coupon {
-  id              String   @id @default(uuid())
-  code            String   @unique
-  discountPercent Float
-  maxUses         Int      @default(1)
-  usedCount       Int      @default(0)
-  isActive        Boolean  @default(true)
-  userId          String?
-  user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tickets         Ticket[]
-  createdAt       DateTime @default(now())
+  id                    String   @id @default(uuid())
+  code                  String   @unique
+  discountPercent       Float
+  
+  // 💰 RATEIO FINANCEIRO: Quem paga o desconto?
+  platformSharePercent  Float    @default(50.0)
+  producerSharePercent  Float    @default(50.0)
+  
+  maxUses               Int      @default(1)
+  usedCount             Int      @default(0)
+  isActive              Boolean  @default(true)
+  userId                String?
+  user                  User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tickets               Ticket[]
+  createdAt             DateTime @default(now())
 }
 
 model Carpool {

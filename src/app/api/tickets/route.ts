@@ -4,6 +4,40 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import { prisma } from "@/lib/prisma";
 import { preferenceClient, calculateSplit } from "@/lib/mercadopago";
 
+// ─── HELPER PARA CONCESSÃO DE GIROS DA ROLETA ──────────────────
+async function grantSpinsIfEligible(tx: any, userId: string) {
+  const uncountedTickets = await tx.ticket.findMany({
+    where: {
+      userId: userId,
+      status: "APPROVED",
+      spinGranted: false,
+    },
+    select: { id: true }
+  });
+
+  if (uncountedTickets.length >= 2) {
+    const pairsCount = Math.floor(uncountedTickets.length / 2);
+    const spinsToGrant = pairsCount;
+    const ticketIdsToMark = uncountedTickets.slice(0, pairsCount * 2).map((t: any) => t.id);
+
+    await tx.user.update({
+      where: { id: userId },
+      data: { availableSpins: { increment: spinsToGrant } }
+    });
+
+    await tx.ticket.updateMany({
+      where: {
+        id: { in: ticketIdsToMark }
+      },
+      data: {
+        spinGranted: true
+      }
+    });
+
+    console.log(`[Roleta Sparty] Concedido ${spinsToGrant} giros para o usuário ${userId} (tickets: ${ticketIdsToMark.join(", ")})`);
+  }
+}
+
 // ─── POST /api/tickets ─────────────────────────────────────────
 // Inicia a compra de um ingresso e cria preferência no MercadoPago ou Simulação (ACID Compliant)
 export async function POST(req: Request) {
@@ -100,6 +134,9 @@ export async function POST(req: Request) {
       let discountAmount = 0;
       let couponId: string | null = null;
 
+      let platformFee = parseFloat((finalPrice * 0.1).toFixed(2));
+      let producerAmount = parseFloat((finalPrice - platformFee).toFixed(2));
+
       if (couponCode && couponCode.trim()) {
         const coupon = await tx.coupon.findUnique({
           where: { code: couponCode.trim().toUpperCase() },
@@ -117,15 +154,22 @@ export async function POST(req: Request) {
         finalPrice = Math.max(0, parseFloat((event.price - discountAmount).toFixed(2)));
         couponId = coupon.id;
 
+        // Calcular rateio financeiro do prejuízo do cupom
+        const normalPlatformFee = parseFloat((event.price * 0.1).toFixed(2));
+        const normalProducerAmount = parseFloat((event.price * 0.9).toFixed(2));
+
+        const platformDiscountBurden = parseFloat(((discountAmount * coupon.platformSharePercent) / 100).toFixed(2));
+        const producerDiscountBurden = parseFloat((discountAmount - platformDiscountBurden).toFixed(2));
+
+        platformFee = Math.max(0, parseFloat((normalPlatformFee - platformDiscountBurden).toFixed(2)));
+        producerAmount = Math.max(0, parseFloat((normalProducerAmount - producerDiscountBurden).toFixed(2)));
+
         // Atualizar contagem de uso do cupom de forma atômica
         await tx.coupon.update({
           where: { id: coupon.id },
           data: { usedCount: { increment: 1 } },
         });
       }
-
-      // Calcular split: 10% plataforma / 90% produtor baseado no preço final recalculado
-      const { platformFee, producerAmount } = calculateSplit(finalPrice);
 
       const mpAccessToken = process.env.MP_ACCESS_TOKEN;
       const isSimulated = !mpAccessToken || mpAccessToken.trim() === "" || mpAccessToken.includes("YOUR") || mpAccessToken.includes("sb_publishable");
@@ -149,8 +193,12 @@ export async function POST(req: Request) {
             mpPreferenceId: "SIMULADO-PREF",
             isVerified,
             verificationCode,
+            spinGranted: false, // Inicia como falso, depois o helper avalia elegibilidade
           },
         });
+
+        // Avaliar concessão de giros na simulação
+        await grantSpinsIfEligible(tx, userId);
 
         return {
           ticket,
@@ -175,6 +223,7 @@ export async function POST(req: Request) {
           discountAmount,
           isVerified,
           verificationCode,
+          spinGranted: false,
         },
       });
 
@@ -187,6 +236,7 @@ export async function POST(req: Request) {
         producerAmount,
       };
     });
+
 
     // Se for uma compra simulada em dev, retorna diretamente
     if (transactionResult.simulated) {
