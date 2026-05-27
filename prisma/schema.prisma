@@ -95,6 +95,10 @@ model Ticket {
   platformFee    Float                // 10% - valor da plataforma
   producerAmount Float                // 90% - valor líquido para o produtor
 
+  // Verificação de segurança (Magic Link / OTP para visitantes)
+  verificationCode String?
+  isVerified       Boolean      @default(true)
+
   // Relação com cupons
   couponId       String?
   coupon         Coupon?      @relation(fields: [couponId], references: [id])

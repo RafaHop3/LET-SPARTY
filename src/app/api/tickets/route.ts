@@ -15,6 +15,7 @@ export async function POST(req: Request) {
     let userId = (session?.user as any)?.id;
     let userEmail = session?.user?.email;
     let userName = session?.user?.name;
+    const isLoggedIn = !!userId;
 
     // Protocolo de Login Opcional: Se não logado, requer email/nome para checkout de visitante
     if (!userId) {
@@ -74,13 +75,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // Verificar se o usuário já tem ingresso aprovado
+    // Verificar se o usuário já tem ingresso aprovado e verificado
     const existingTicket = await prisma.ticket.findFirst({
-      where: { eventId, userId, status: "APPROVED" },
+      where: { eventId, userId, status: "APPROVED", isVerified: true },
     });
     if (existingTicket) {
       return NextResponse.json(
-        { error: "Você já possui um ingresso ativo para este evento" },
+        { error: "Você já possui um ingresso ativo e verificado para este evento" },
         { status: 400 }
       );
     }
@@ -111,10 +112,26 @@ export async function POST(req: Request) {
     // Calcular split: 10% plataforma / 90% produtor baseado no preço final
     const { platformFee, producerAmount } = calculateSplit(finalPrice);
 
+    // --- SEGURANÇA E PROVA DE PROPRIEDADE (OTP / MAGIC LINK PARA VISITANTES) ---
+    // Se for guest checkout, geramos um código de verificação OTP de 6 dígitos
+    const isVerified = isLoggedIn; // Autenticados são auto-verificados
+    const verificationCode = isLoggedIn 
+      ? null 
+      : String(Math.floor(100000 + Math.random() * 900000)); // 6-digit OTP
+
     // --- PROTOCOLO DE TESTE / COMPRA SIMULADA ---
     // Se MP_ACCESS_TOKEN não está definido, fazemos compra instantânea simulada para desenvolvimento
     const mpAccessToken = process.env.MP_ACCESS_TOKEN;
     if (!mpAccessToken || mpAccessToken.trim() === "" || mpAccessToken.includes("YOUR") || mpAccessToken.includes("sb_publishable")) {
+      
+      // ⚠️ BLOQUEIO ESTRITO EM PRODUÇÃO: O Fallback Sandbox NUNCA pode ser executado em produção
+      if (process.env.NODE_ENV === "production") {
+        console.error("[CRITICAL CONFIG ERROR] MercadoPago Access Token está ausente no ambiente de PRODUÇÃO!");
+        return NextResponse.json(
+          { error: "Erro crítico de configuração do servidor" },
+          { status: 500 }
+        );
+      }
       
       const ticket = await prisma.ticket.create({
         data: {
@@ -128,6 +145,8 @@ export async function POST(req: Request) {
           discountAmount,
           mpPaymentId: `SIMULADO-${Date.now()}`,
           mpPreferenceId: "SIMULADO-PREF",
+          isVerified,
+          verificationCode,
         },
       });
 
@@ -141,6 +160,8 @@ export async function POST(req: Request) {
           platformFee,
           producerAmount,
           status: "APPROVED",
+          isVerified,
+          verificationCode, // Retornamos para poder ser exibido no toast do frontend para testes
         },
         { status: 201 }
       );
@@ -158,6 +179,8 @@ export async function POST(req: Request) {
         producerAmount,
         couponId,
         discountAmount,
+        isVerified,
+        verificationCode,
       },
     });
 
@@ -207,13 +230,15 @@ export async function POST(req: Request) {
         discountAmount,
         platformFee,
         producerAmount,
+        isVerified,
+        verificationCode,
       },
       { status: 201 }
     );
   } catch (error) {
-    console.error("[POST /api/tickets] Error:", error);
+    console.error("[POST /api/tickets] Erro crítico:", error);
     return NextResponse.json(
-      { error: "Erro ao criar ingresso" },
+      { error: "Erro de processamento interno no servidor" },
       { status: 500 }
     );
   }

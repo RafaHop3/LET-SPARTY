@@ -27,7 +27,8 @@ import {
   Send,
   ExternalLink,
   Shield,
-  Gift
+  Gift,
+  X
 } from 'lucide-react';
 
 interface Event {
@@ -170,6 +171,11 @@ export default function Home() {
 
   const [guestEmailLookup, setGuestEmailLookup] = useState('');
 
+  // OTP Verification States (Magic Link / Passwordless para Visitantes)
+  const [selectedTicketToVerify, setSelectedTicketToVerify] = useState<any | null>(null);
+  const [verificationOtpInput, setVerificationOtpInput] = useState('');
+  const [verifyingTicket, setVerifyingTicket] = useState(false);
+
   // Fetch Events
   const fetchEvents = async () => {
     setLoadingEvents(true);
@@ -299,9 +305,20 @@ export default function Home() {
       }
 
       if (data.simulated) {
-        setSuccessMsg(`Ingresso comprado com sucesso para ${selectedEventToBuy.title}! (Modo Desenvolvimento)`);
+        if (data.isVerified) {
+          setSuccessMsg(`Ingresso comprado com sucesso para ${selectedEventToBuy.title}! (Modo Desenvolvimento)`);
+        } else {
+          setSuccessMsg(`Ingresso gerado! [DEV TESTE] Código OTP enviado: ${data.verificationCode}. Por favor, verifique seu ingresso abaixo para ativá-lo.`);
+        }
+        
         fetchEvents();
-        if (session?.user) fetchMyTickets();
+        if (session?.user) {
+          fetchMyTickets();
+        } else if (checkoutPayload.email) {
+          setGuestEmailLookup(checkoutPayload.email);
+          fetchMyTickets(checkoutPayload.email);
+          setActiveTab('my-tickets'); // Redireciona para visualização imediata
+        }
       } else if (data.checkoutUrl) {
         // Redireciona para o MercadoPago real/sandbox
         window.location.href = data.checkoutUrl;
@@ -310,6 +327,46 @@ export default function Home() {
       setErrorMsg('Erro de conexão ao processar compra.');
     } finally {
       setSelectedEventToBuy(null);
+    }
+  };
+
+  // Handle guest ticket OTP verification (Magic Link / Passwordless proof of ownership)
+  const handleVerifyTicket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedTicketToVerify || !verificationOtpInput.trim()) return;
+    setVerifyingTicket(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+
+    try {
+      const res = await fetch('/api/tickets/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticketId: selectedTicketToVerify.id,
+          code: verificationOtpInput.trim(),
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setSuccessMsg(data.message || 'Ingresso verificado com sucesso!');
+        setSelectedTicketToVerify(null);
+        setVerificationOtpInput('');
+        
+        // Recarregar lista de ingressos
+        if (session?.user) {
+          fetchMyTickets();
+        } else if (guestEmailLookup) {
+          fetchMyTickets(guestEmailLookup);
+        }
+      } else {
+        setErrorMsg(data.error || 'Código de verificação inválido');
+      }
+    } catch (err) {
+      setErrorMsg('Erro de conexão ao verificar ingresso.');
+    } finally {
+      setVerifyingTicket(false);
     }
   };
 
@@ -1239,11 +1296,21 @@ export default function Home() {
             ) : myTickets.length > 0 ? (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '20px' }}>
                 {myTickets.map(t => {
+                  const isTicketVerified = t.isVerified;
+
                   return (
-                    <div key={t.id} className="glass-panel animate-fade-in" style={{ padding: '20px', borderLeft: '4px solid var(--primary-color)' }}>
-                      <span style={{ fontSize: '0.7rem', padding: '2px 8px', background: 'var(--primary-color)', color: 'black', borderRadius: '4px', fontWeight: 800, display: 'inline-block', marginBottom: '12px' }}>
-                        🛡️ {t.status}
-                      </span>
+                    <div key={t.id} className="glass-panel animate-fade-in" style={{ padding: '20px', borderLeft: `4px solid ${isTicketVerified ? 'var(--primary-color)' : 'var(--accent-color)'}` }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '12px' }}>
+                        <span style={{ fontSize: '0.7rem', padding: '2px 8px', background: isTicketVerified ? 'var(--primary-color)' : 'rgba(255,255,255,0.08)', color: isTicketVerified ? 'black' : 'white', borderRadius: '4px', fontWeight: 800, display: 'inline-block' }}>
+                          🛡️ {t.status}
+                        </span>
+                        {!isTicketVerified && (
+                          <span style={{ fontSize: '0.7rem', padding: '2px 8px', background: 'var(--accent-color)', color: 'white', borderRadius: '4px', fontWeight: 800, display: 'inline-block' }}>
+                            ⚠️ REQUER OTP
+                          </span>
+                        )}
+                      </div>
+
                       <h4 style={{ fontWeight: 700, fontSize: '1.05rem', marginBottom: '8px' }}>{t.event.title}</h4>
                       
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '14px' }}>
@@ -1255,21 +1322,32 @@ export default function Home() {
                         </div>
                       </div>
 
-                      <div style={{ fontSize: '0.8rem', borderTop: '1px dashed var(--surface-border)', paddingTop: '10px', display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
+                      <div style={{ fontSize: '0.8rem', borderTop: '1px dashed var(--surface-border)', paddingTop: '10px', display: 'flex', justifyItems: 'space-between', fontWeight: 600 }}>
                         <span>Valor Pago:</span>
                         <span style={{ color: 'var(--primary-color)' }}>R$ {t.amount.toFixed(2)}</span>
                       </div>
                       
-                      {/* Uber direct deep-link */}
-                      <a
-                        href={getUberLink(t.event.venue)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn-secondary"
-                        style={{ width: '100%', marginTop: '14px', fontSize: '0.8rem', padding: '6px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px' }}
-                      >
-                        Chamar Corrida (Uber) <ExternalLink size={12} />
-                      </a>
+                      {isTicketVerified ? (
+                        /* Uber direct deep-link only for verified tickets */
+                        <a
+                          href={getUberLink(t.event.venue)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-secondary hover-scale"
+                          style={{ width: '100%', marginTop: '14px', fontSize: '0.8rem', padding: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px' }}
+                        >
+                          Chamar Corrida (Uber) <ExternalLink size={12} />
+                        </a>
+                      ) : (
+                        /* Verification button for unverified guest checkouts */
+                        <button
+                          onClick={() => setSelectedTicketToVerify(t)}
+                          className="btn-primary hover-scale"
+                          style={{ width: '100%', marginTop: '14px', fontSize: '0.8rem', padding: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
+                        >
+                          Verificar Código OTP 🛡️
+                        </button>
+                      )}
                     </div>
                   );
                 })}
@@ -1480,6 +1558,61 @@ export default function Home() {
           onClose={() => setSelectedEventToBuy(null)}
           onConfirm={handleTicketConfirm}
         />
+      )}
+
+      {selectedTicketToVerify && (
+        <div className="modalOverlay" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.85)', backdropFilter: 'blur(8px)',
+          display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000
+        }}>
+          <form onSubmit={handleVerifyTicket} className="glass-panel animate-fade-in" style={{
+            width: '100%', maxWidth: '400px', padding: '32px', position: 'relative'
+          }}>
+            <button type="button" onClick={() => setSelectedTicketToVerify(null)} className="closeBtn" style={{
+              position: 'absolute', top: '16px', right: '16px', color: 'var(--text-muted)'
+            }}>
+              <X size={24} />
+            </button>
+
+            <div className="flex-center" style={{ marginBottom: '16px', color: 'var(--accent-color)' }}>
+              <Shield size={48} />
+            </div>
+
+            <h2 className="modalTitle" style={{ marginBottom: '12px' }}>
+              Confirmar E-mail
+            </h2>
+
+            <p style={{ textAlign: 'center', marginBottom: '24px', color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: '1.4' }}>
+              Insira o código de **6 dígitos** enviado para seu e-mail para ativar seu ingresso para <strong>{selectedTicketToVerify.event.title}</strong>.
+            </p>
+
+            <div style={{ marginBottom: '24px' }}>
+              <input
+                type="text"
+                maxLength={6}
+                required
+                value={verificationOtpInput}
+                onChange={(e) => setVerificationOtpInput(e.target.value.replace(/\D/g, ''))}
+                placeholder="000000"
+                style={{
+                  width: '100%', padding: '12px', borderRadius: '8px',
+                  background: 'rgba(255,255,255,0.05)', border: '1px solid var(--surface-border)',
+                  color: 'white', fontSize: '1.5rem', textAlign: 'center', letterSpacing: '8px', fontWeight: 700
+                }}
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={verifyingTicket || verificationOtpInput.length !== 6}
+              className="btn-primary hover-scale"
+              style={{ width: '100%', background: 'linear-gradient(135deg, var(--accent-color) 0%, #d00060 100%)', color: 'white', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}
+            >
+              {verifyingTicket ? 'Ativando...' : 'Ativar Ingresso'}
+            </button>
+          </form>
+        </div>
       )}
     </main>
   );

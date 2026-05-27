@@ -5,13 +5,15 @@ import { TicketStatus } from "@prisma/client";
 import crypto from "crypto";
 
 // ─── POST /api/webhooks/mercadopago ────────────────────────────
-// Recebe notificações do MercadoPago sobre status de pagamentos
+// Recebe notificações do MercadoPago sobre status de pagamentos com verificação e idempotência
 export async function POST(req: Request) {
+  let webhookValidationFailed = false;
+
   try {
     const body = await req.text();
     const data = JSON.parse(body);
 
-    // Validar assinatura do webhook (segurança)
+    // 1. Validar assinatura do webhook (Segurança Física)
     const webhookSecret = process.env.MP_WEBHOOK_SECRET;
     if (webhookSecret) {
       const xSignature = req.headers.get("x-signature");
@@ -34,7 +36,8 @@ export async function POST(req: Request) {
           .digest("hex");
 
         if (hash !== expectedHash) {
-          console.warn("[MP Webhook] Assinatura inválida");
+          console.warn("[MP Webhook] Assinatura inválida detectada.");
+          webhookValidationFailed = true;
           return NextResponse.json(
             { error: "Assinatura inválida" },
             { status: 401 }
@@ -53,9 +56,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ received: true });
     }
 
+    // 2. Garantia de Idempotência: Evita emissão dupla e processamento repetido
+    const existingTicket = await prisma.ticket.findFirst({
+      where: { mpPaymentId: String(paymentId) },
+    });
+    
+    if (existingTicket && existingTicket.status === "APPROVED") {
+      console.log(`[MP Webhook] Idempotência acionada: Pagamento ${paymentId} já processado.`);
+      return NextResponse.json({ received: true });
+    }
+
     // Buscar detalhes do pagamento no MP
     const payment = await paymentClient.get({ id: paymentId });
-
     const externalReference = payment.external_reference; // = ticket.id
     const status = payment.status; // approved | rejected | pending | cancelled
 
@@ -77,7 +89,7 @@ export async function POST(req: Request) {
 
     const ticketStatus = ticketStatusMap[status || ""] || "PENDING";
 
-    // Atualizar o ticket no banco
+    // 3. Atualizar o ticket no banco
     await prisma.ticket.update({
       where: { id: externalReference },
       data: {
@@ -87,14 +99,24 @@ export async function POST(req: Request) {
     });
 
     console.log(
-      `[MP Webhook] Ticket ${externalReference} → ${ticketStatus} (payment: ${paymentId})`
+      `[MP Webhook] Ticket ${externalReference} atualizado com sucesso para ${ticketStatus} (pagamento: ${paymentId})`
     );
 
     return NextResponse.json({ received: true });
   } catch (error) {
-    console.error("[POST /api/webhooks/mercadopago]", error);
-    // Sempre retornar 200 para o MP não reenviar
-    return NextResponse.json({ received: true });
+    // Registra o log estruturado sem dados sensíveis de PII no console do servidor
+    console.error("[POST /api/webhooks/mercadopago] Exceção crítica:", error);
+
+    // Se falhou na validação de assinatura, já retornou 401. 
+    if (webhookValidationFailed) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // Retorna erro 500 para falhas no banco/infra para ativar a fila de retentativas (Retry Pattern) do MercadoPago
+    return NextResponse.json(
+      { error: "Erro de processamento interno no servidor" },
+      { status: 500 }
+    );
   }
 }
 
