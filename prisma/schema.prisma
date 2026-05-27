@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id               String            @id @default(uuid())
+  email            String            @unique
+  passwordHash     String?
+  name             String
+  role             Role
+  createdAt        DateTime          @default(now())
+
+  festeiroProfile  FesteiroProfile?
+  produtoraProfile ProdutoraProfile?
+  events           Event[]
+  tickets          Ticket[]
+  votes            Vote[]
+}
+
+enum Role {
+  FESTEIRO
+  PRODUTORA
+}
+
+model FesteiroProfile {
+  id        String  @id @default(uuid())
+  userId    String  @unique
+  phone     String?
+  cpf       String  @unique
+  avatarUrl String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ProdutoraProfile {
+  id                String  @id @default(uuid())
+  userId            String  @unique
+  cnpj              String  @unique
+  companyName       String
+  description       String?
+  bankAccount       String?
+  mpAccessToken     String? // MercadoPago Access Token da produtora (para receber pagamentos)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Event {
+  id          String   @id @default(uuid())
+  title       String
+  category    String
+  date        DateTime
+  price       Float
+  venue       String
+  city        String   @default("")
+  imageUrl    String?
+  description String?
+  score       Float    @default(0)
+  votes       Int      @default(0)
+  isActive    Boolean  @default(true)
+
+  produtoraId String
+  produtora   User     @relation(fields: [produtoraId], references: [id])
+  tickets     Ticket[]
+  voteRecords Vote[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Ticket {
+  id             String       @id @default(uuid())
+  eventId        String
+  userId         String
+  mpPaymentId    String?      @unique // ID do pagamento no MercadoPago
+  mpPreferenceId String?              // ID da preferência de pagamento
+  status         TicketStatus @default(PENDING)
+  amount         Float                // Valor total do ticket
+  platformFee    Float                // 10% - valor da plataforma
+  producerAmount Float                // 90% - valor líquido para o produtor
+
+  event Event @relation(fields: [eventId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum TicketStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model Vote {
+  id      String @id @default(uuid())
+  userId  String
+  eventId String
+  score   Int // 1-5
+
+  user  User  @relation(fields: [userId], references: [id])
+  event Event @relation(fields: [eventId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, eventId])
+}
