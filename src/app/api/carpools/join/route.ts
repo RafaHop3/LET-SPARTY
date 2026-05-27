@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import { prisma } from "@/lib/prisma";
 
-// POST /api/carpools/join - Permite a um usuário juntar-se a uma carona (login opcional)
+// POST /api/carpools/join - Permite a um usuário juntar-se a uma carona (ACID transacional robusto contra concorrência)
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
@@ -41,56 +41,63 @@ export async function POST(req: Request) {
       userId = customGuest.id;
     }
 
-    // Buscar carona e verificar se há assentos disponíveis
-    const carpool = await prisma.carpool.findUnique({
-      where: { id: carpoolId },
-      include: {
-        passengers: true,
-      },
-    });
+    // ─── TRANSAÇÃO INTERATIVA ATÔMICA (ACID) ───
+    // Evita concorrência destrutiva onde dois requests paralelos lêem vagas livres antes de escrever no banco.
+    const passengerRecord = await prisma.$transaction(async (tx) => {
+      // Buscar carona e passageiros de forma transacional isolada
+      const carpool = await tx.carpool.findUnique({
+        where: { id: carpoolId },
+        include: {
+          passengers: true,
+        },
+      });
 
-    if (!carpool) {
-      return NextResponse.json({ error: "Carona não encontrada" }, { status: 404 });
-    }
+      if (!carpool) {
+        throw new Error("Carona não encontrada no sistema");
+      }
 
-    if (carpool.driverId === userId) {
-      return NextResponse.json({ error: "Você é o motorista desta carona" }, { status: 400 });
-    }
+      if (carpool.driverId === userId) {
+        throw new Error("Você é o motorista desta carona e não pode entrar como passageiro");
+      }
 
-    // Verificar se já está na carona
-    const alreadyPassenger = carpool.passengers.some(p => p.passengerId === userId);
-    if (alreadyPassenger) {
-      return NextResponse.json({ error: "Você já está participando desta carona" }, { status: 400 });
-    }
+      // Verificar se já está na carona
+      const alreadyPassenger = carpool.passengers.some(p => p.passengerId === userId);
+      if (alreadyPassenger) {
+        throw new Error("Você já está participando desta carona");
+      }
 
-    // Verificar assentos disponíveis
-    const takenSeats = carpool.passengers.length;
-    if (takenSeats >= carpool.availableSeats) {
-      return NextResponse.json({ error: "Desculpe, esta carona já está lotada" }, { status: 400 });
-    }
+      // Verificar assentos disponíveis de forma isolada
+      const takenSeats = carpool.passengers.length;
+      if (takenSeats >= carpool.availableSeats) {
+        throw new Error("Desculpe, esta carona já está lotada!");
+      }
 
-    // Criar o passageiro na carona
-    const passengerRecord = await prisma.carpoolPassenger.create({
-      data: {
-        carpoolId,
-        passengerId: userId,
-      },
-      include: {
-        passenger: {
-          select: {
-            id: true,
-            name: true,
+      // Criar o passageiro na carona de forma atômica
+      return await tx.carpoolPassenger.create({
+        data: {
+          carpoolId,
+          passengerId: userId,
+        },
+        include: {
+          passenger: {
+            select: {
+              id: true,
+              name: true,
+            },
           },
         },
-      },
+      });
     });
 
     return NextResponse.json({
       message: "Você se juntou à carona com sucesso!",
       passenger: passengerRecord,
     }, { status: 201 });
-  } catch (error) {
-    console.error("[POST /api/carpools/join] Error:", error);
-    return NextResponse.json({ error: "Erro ao juntar-se à carona" }, { status: 500 });
+  } catch (error: any) {
+    console.error("[POST /api/carpools/join] Erro transacional crítico:", error);
+    return NextResponse.json(
+      { error: error.message || "Erro ao juntar-se à carona" },
+      { status: 500 }
+    );
   }
 }

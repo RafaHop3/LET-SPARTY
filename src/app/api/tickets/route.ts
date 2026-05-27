@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { preferenceClient, calculateSplit } from "@/lib/mercadopago";
 
 // ─── POST /api/tickets ─────────────────────────────────────────
-// Inicia a compra de um ingresso e cria preferência no MercadoPago ou Simulação
+// Inicia a compra de um ingresso e cria preferência no MercadoPago ou Simulação (ACID Compliant)
 export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
@@ -86,114 +86,138 @@ export async function POST(req: Request) {
       );
     }
 
-    // --- PROCESSAMENTO DE CUPOM ---
-    let finalPrice = event.price;
-    let discountAmount = 0;
-    let couponId: string | null = null;
-
-    if (couponCode && couponCode.trim()) {
-      const coupon = await prisma.coupon.findUnique({
-        where: { code: couponCode.trim().toUpperCase() },
-      });
-
-      if (coupon && coupon.isActive && coupon.usedCount < coupon.maxUses) {
-        discountAmount = parseFloat(((event.price * coupon.discountPercent) / 100).toFixed(2));
-        finalPrice = Math.max(0, parseFloat((event.price - discountAmount).toFixed(2)));
-        couponId = coupon.id;
-
-        // Atualizar contagem de uso do cupom
-        await prisma.coupon.update({
-          where: { id: coupon.id },
-          data: { usedCount: { increment: 1 } },
-        });
-      }
-    }
-
-    // Calcular split: 10% plataforma / 90% produtor baseado no preço final
-    const { platformFee, producerAmount } = calculateSplit(finalPrice);
-
     // --- SEGURANÇA E PROVA DE PROPRIEDADE (OTP / MAGIC LINK PARA VISITANTES) ---
-    // Se for guest checkout, geramos um código de verificação OTP de 6 dígitos
     const isVerified = isLoggedIn; // Autenticados são auto-verificados
     const verificationCode = isLoggedIn 
       ? null 
       : String(Math.floor(100000 + Math.random() * 900000)); // 6-digit OTP
 
-    // --- PROTOCOLO DE TESTE / COMPRA SIMULADA ---
-    // Se MP_ACCESS_TOKEN não está definido, fazemos compra instantânea simulada para desenvolvimento
-    const mpAccessToken = process.env.MP_ACCESS_TOKEN;
-    if (!mpAccessToken || mpAccessToken.trim() === "" || mpAccessToken.includes("YOUR") || mpAccessToken.includes("sb_publishable")) {
-      
-      // ⚠️ BLOQUEIO ESTRITO EM PRODUÇÃO: O Fallback Sandbox NUNCA pode ser executado em produção
-      if (process.env.NODE_ENV === "production") {
-        console.error("[CRITICAL CONFIG ERROR] MercadoPago Access Token está ausente no ambiente de PRODUÇÃO!");
-        return NextResponse.json(
-          { error: "Erro crítico de configuração do servidor" },
-          { status: 500 }
-        );
+    // ─── TRANSAÇÃO INTERATIVA ATÔMICA (ACID Compliant) ───
+    // Encapsula verificação/atualização de cupom e criação do ticket para garantir que não haja
+    // inconsistência caso qualquer operação falhe.
+    const transactionResult = await prisma.$transaction(async (tx) => {
+      let finalPrice = event.price;
+      let discountAmount = 0;
+      let couponId: string | null = null;
+
+      if (couponCode && couponCode.trim()) {
+        const coupon = await tx.coupon.findUnique({
+          where: { code: couponCode.trim().toUpperCase() },
+        });
+
+        if (!coupon) {
+          throw new Error("Cupom inserido não existe");
+        }
+
+        if (!coupon.isActive || coupon.usedCount >= coupon.maxUses) {
+          throw new Error("Este cupom de desconto já foi utilizado ou está expirado");
+        }
+
+        discountAmount = parseFloat(((event.price * coupon.discountPercent) / 100).toFixed(2));
+        finalPrice = Math.max(0, parseFloat((event.price - discountAmount).toFixed(2)));
+        couponId = coupon.id;
+
+        // Atualizar contagem de uso do cupom de forma atômica
+        await tx.coupon.update({
+          where: { id: coupon.id },
+          data: { usedCount: { increment: 1 } },
+        });
       }
-      
-      const ticket = await prisma.ticket.create({
+
+      // Calcular split: 10% plataforma / 90% produtor baseado no preço final recalculado
+      const { platformFee, producerAmount } = calculateSplit(finalPrice);
+
+      const mpAccessToken = process.env.MP_ACCESS_TOKEN;
+      const isSimulated = !mpAccessToken || mpAccessToken.trim() === "" || mpAccessToken.includes("YOUR") || mpAccessToken.includes("sb_publishable");
+
+      if (isSimulated) {
+        if (process.env.NODE_ENV === "production") {
+          throw new Error("Erro de Configuração Crítico: O token do MercadoPago está ausente em ambiente de PRODUÇÃO!");
+        }
+
+        const ticket = await tx.ticket.create({
+          data: {
+            eventId,
+            userId,
+            status: "APPROVED", // Auto-aprova em sandbox
+            amount: finalPrice,
+            platformFee,
+            producerAmount,
+            couponId,
+            discountAmount,
+            mpPaymentId: `SIMULADO-${Date.now()}`,
+            mpPreferenceId: "SIMULADO-PREF",
+            isVerified,
+            verificationCode,
+          },
+        });
+
+        return {
+          ticket,
+          simulated: true,
+          amount: finalPrice,
+          discountAmount,
+          platformFee,
+          producerAmount,
+        };
+      }
+
+      // Caso integrado com MercadoPago real
+      const ticket = await tx.ticket.create({
         data: {
           eventId,
           userId,
-          status: "APPROVED", // Auto-aprova para fluidez de teste sem chaves
+          status: "PENDING",
           amount: finalPrice,
           platformFee,
           producerAmount,
           couponId,
           discountAmount,
-          mpPaymentId: `SIMULADO-${Date.now()}`,
-          mpPreferenceId: "SIMULADO-PREF",
           isVerified,
           verificationCode,
         },
       });
 
+      return {
+        ticket,
+        simulated: false,
+        amount: finalPrice,
+        discountAmount,
+        platformFee,
+        producerAmount,
+      };
+    });
+
+    // Se for uma compra simulada em dev, retorna diretamente
+    if (transactionResult.simulated) {
       return NextResponse.json(
         {
           message: "Compra simulada com sucesso! (Modo Desenvolvimento)",
           simulated: true,
-          ticketId: ticket.id,
-          amount: finalPrice,
-          discountAmount,
-          platformFee,
-          producerAmount,
+          ticketId: transactionResult.ticket.id,
+          amount: transactionResult.amount,
+          discountAmount: transactionResult.discountAmount,
+          platformFee: transactionResult.platformFee,
+          producerAmount: transactionResult.producerAmount,
           status: "APPROVED",
           isVerified,
-          verificationCode, // Retornamos para poder ser exibido no toast do frontend para testes
+          verificationCode,
         },
         { status: 201 }
       );
     }
 
-    // --- FLUXO INTEGRADO REAL MERCADOPAGO ---
-    // Criar ticket pendente no banco
-    const ticket = await prisma.ticket.create({
-      data: {
-        eventId,
-        userId,
-        status: "PENDING",
-        amount: finalPrice,
-        platformFee,
-        producerAmount,
-        couponId,
-        discountAmount,
-        isVerified,
-        verificationCode,
-      },
-    });
-
+    // --- CRIAÇÃO DE CHECKOUT MERCADOPAGO REAL ---
     const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
     const preference = await preferenceClient.create({
       body: {
         items: [
           {
-            id: ticket.id,
+            id: transactionResult.ticket.id,
             title: `Ingresso — ${event.title}`,
             description: `${event.venue} • ${new Date(event.date).toLocaleDateString("pt-BR")}`,
             quantity: 1,
-            unit_price: finalPrice,
+            unit_price: transactionResult.amount,
             currency_id: "BRL",
           },
         ],
@@ -201,44 +225,44 @@ export async function POST(req: Request) {
           name: userName || "Festeiro Convidado",
           email: userEmail || "convidado@letsparty.com",
         },
-        marketplace_fee: platformFee,
+        marketplace_fee: transactionResult.platformFee,
         back_urls: {
-          success: `${baseUrl}/tickets/success?ticketId=${ticket.id}`,
-          failure: `${baseUrl}/tickets/failure?ticketId=${ticket.id}`,
-          pending: `${baseUrl}/tickets/pending?ticketId=${ticket.id}`,
+          success: `${baseUrl}/tickets/success?ticketId=${transactionResult.ticket.id}`,
+          failure: `${baseUrl}/tickets/failure?ticketId=${transactionResult.ticket.id}`,
+          pending: `${baseUrl}/tickets/pending?ticketId=${transactionResult.ticket.id}`,
         },
         auto_return: "approved",
         notification_url: `${baseUrl}/api/webhooks/mercadopago`,
-        external_reference: ticket.id,
+        external_reference: transactionResult.ticket.id,
         expiration_date_to: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       },
     });
 
-    // Salvar ID da preferência no ticket
+    // Salvar ID da preferência no ticket criado
     await prisma.ticket.update({
-      where: { id: ticket.id },
+      where: { id: transactionResult.ticket.id },
       data: { mpPreferenceId: preference.id },
     });
 
     return NextResponse.json(
       {
-        ticketId: ticket.id,
+        ticketId: transactionResult.ticket.id,
         preferenceId: preference.id,
         checkoutUrl: preference.init_point,
         sandboxCheckoutUrl: preference.sandbox_init_point,
-        amount: finalPrice,
-        discountAmount,
-        platformFee,
-        producerAmount,
+        amount: transactionResult.amount,
+        discountAmount: transactionResult.discountAmount,
+        platformFee: transactionResult.platformFee,
+        producerAmount: transactionResult.producerAmount,
         isVerified,
         verificationCode,
       },
       { status: 201 }
     );
-  } catch (error) {
-    console.error("[POST /api/tickets] Erro crítico:", error);
+  } catch (error: any) {
+    console.error("[POST /api/tickets] Erro transacional crítico:", error);
     return NextResponse.json(
-      { error: "Erro de processamento interno no servidor" },
+      { error: error.message || "Erro de processamento interno no servidor" },
       { status: 500 }
     );
   }
