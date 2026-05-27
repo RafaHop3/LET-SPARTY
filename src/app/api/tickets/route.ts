@@ -13,7 +13,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
     }
 
-    const user = session.user as any;
+    const user = session.user as { id: string; role: string; name?: string; email?: string };
     const body = await req.json();
     const { eventId } = body;
 

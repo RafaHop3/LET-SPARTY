@@ -17,7 +17,7 @@ export async function POST(req: Request, { params }: Params) {
       return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
     }
 
-    const user = session.user as any;
+    const user = session.user as { id: string; role: string; name?: string; email?: string };
     const { id: eventId } = await params;
 
     // Verificar se o evento existe

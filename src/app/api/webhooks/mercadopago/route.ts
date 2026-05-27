@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { paymentClient } from "@/lib/mercadopago";
+import { TicketStatus } from "@prisma/client";
 import crypto from "crypto";
 
 // ─── POST /api/webhooks/mercadopago ────────────────────────────
@@ -80,7 +81,7 @@ export async function POST(req: Request) {
     await prisma.ticket.update({
       where: { id: externalReference },
       data: {
-        status: ticketStatus as any,
+        status: ticketStatus as TicketStatus,
         mpPaymentId: String(paymentId),
       },
     });

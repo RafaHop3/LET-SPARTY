@@ -12,7 +12,7 @@ export async function GET() {
       return NextResponse.json({ error: "Não autorizado" }, { status: 401 });
     }
 
-    const user = session.user as any;
+    const user = session.user as { id: string; role: string; name?: string; email?: string };
 
     const tickets = await prisma.ticket.findMany({
       where: { userId: user.id },
