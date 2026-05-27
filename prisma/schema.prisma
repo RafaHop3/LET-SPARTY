@@ -109,6 +109,10 @@ model Ticket {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([eventId])
+  @@index([status])
 }
 
 enum TicketStatus {
@@ -144,6 +148,9 @@ model Post {
   eventId   String?
   event     Event?    @relation(fields: [eventId], references: [id], onDelete: Cascade)
   comments  Comment[]
+
+  @@index([eventId])
+  @@index([createdAt(sort: Desc)])
 }
 
 model Comment {
@@ -182,6 +189,9 @@ model Carpool {
   signedWaiver      Boolean            @default(true)
   passengers        CarpoolPassenger[]
   createdAt         DateTime           @default(now())
+
+  @@index([eventId])
+  @@index([driverId])
 }
 
 model CarpoolPassenger {
