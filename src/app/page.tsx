@@ -663,6 +663,13 @@ export default function Home() {
     return `https://m.uber.com/ul/?action=setPickup&pickup=my_location&dropoff[nickname]=${encodeURIComponent(venue)}`;
   };
 
+  // Deep Link for 99
+  const get99Link = (venue: string) => {
+    // taxis99:// protocol scheme abre o app 99 diretamente na tela de busca preenchendo o local do evento no celular
+    return `taxis99://taxis99?action=search&keyword=${encodeURIComponent(venue)}`;
+  };
+
+
   // Helper check for active voting
   const isVotingOpen = (eventDateStr: string) => {
     const now = new Date();
@@ -794,17 +801,27 @@ export default function Home() {
                       </div>
 
                       {/* Ride hailing integration directly inside explore grid */}
-                      <div style={{ marginTop: '-12px', padding: '0 12px 12px 12px' }}>
+                      <div style={{ marginTop: '-12px', padding: '0 12px 12px 12px', display: 'flex', gap: '8px' }}>
                         <a 
                           href={getUberLink(event.venue)} 
                           target="_blank" 
                           rel="noopener noreferrer"
                           className="glass-panel flex-center hover-scale"
-                          style={{ background: 'rgba(255,255,255,0.03)', padding: '8px', fontSize: '0.8rem', borderRadius: '0 0 12px 12px', borderTop: 'none', gap: '6px', color: 'var(--text-muted)' }}
+                          style={{ flex: 1, background: 'rgba(255,255,255,0.03)', padding: '8px', fontSize: '0.75rem', borderRadius: '0 0 0 12px', borderTop: 'none', gap: '4px', color: 'var(--text-muted)' }}
                         >
-                          Ir de Uber ao evento <ExternalLink size={12} />
+                          Ir de Uber <ExternalLink size={10} />
+                        </a>
+                        <a 
+                          href={get99Link(event.venue)} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="glass-panel flex-center hover-scale"
+                          style={{ flex: 1, background: 'rgba(255,255,255,0.03)', padding: '8px', fontSize: '0.75rem', borderRadius: '0 0 12px 0', borderTop: 'none', gap: '4px', color: 'var(--text-muted)' }}
+                        >
+                          Ir de 99 <ExternalLink size={10} />
                         </a>
                       </div>
+
                     </div>
                   );
                 })}
@@ -1377,17 +1394,29 @@ export default function Home() {
                       </div>
                       
                       {isTicketVerified ? (
-                        /* Uber direct deep-link only for verified tickets */
-                        <a
-                          href={getUberLink(t.event.venue)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="btn-secondary hover-scale"
-                          style={{ width: '100%', marginTop: '14px', fontSize: '0.8rem', padding: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px' }}
-                        >
-                          Chamar Corrida (Uber) <ExternalLink size={12} />
-                        </a>
+                        /* Uber/99 direct deep-link only for verified tickets */
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '14px' }}>
+                          <a
+                            href={getUberLink(t.event.venue)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="btn-secondary hover-scale"
+                            style={{ flex: 1, fontSize: '0.8rem', padding: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px' }}
+                          >
+                            Ir de Uber <ExternalLink size={12} />
+                          </a>
+                          <a
+                            href={get99Link(t.event.venue)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="btn-secondary hover-scale"
+                            style={{ flex: 1, fontSize: '0.8rem', padding: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '4px' }}
+                          >
+                            Ir de 99 <ExternalLink size={12} />
+                          </a>
+                        </div>
                       ) : (
+
                         /* Verification button for unverified guest checkouts */
                         <button
                           onClick={() => setSelectedTicketToVerify(t)}
